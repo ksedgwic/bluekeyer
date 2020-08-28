@@ -1,11 +1,31 @@
 // bluetooth, config, discover and audio
+#include "esp_log.h"
+#include "esp_sysview_trace.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 
+// void logit(int level, const char *fmt, va_list ap) {
+//   if (level <= 3) {
+//     char buffer[1024];
+//     vsnprintf(buffer, sizeof(buffer), fmt, ap);
+//     Serial.println(buffer);
+//   }
+// }
+
+// #define LOGE( format, ... )  logit(1, format, ##__VA_ARGS__)
+// #define LOGW( format, ... )  logit(2, format, ##__VA_ARGS__)
+// #define LOGI( format, ... )  logit(3, format, ##__VA_ARGS__)
+// #define LOGD( format, ... )  logit(4, format, ##__VA_ARGS__)
+
 // double SAMPLE_RATE = 44100;
+
+#define LOGLEVEL ESP_LOG_DEBUG
+static const char *LOGTAG = "bluekeyer";
+#define LOGE( format, ...) ESP_LOGE(LOGTAG, format,  ##__VA_ARGS__)
+#define LOGD( format, ...) ESP_LOGD(LOGTAG, format,  ##__VA_ARGS__)
 
 /* A2DP global state */
 enum {
@@ -145,6 +165,7 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
 
 static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
+  LOGD("gap_cb starting\n");
   switch (event) {
   case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: /*!< discovery state changed event */
     if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
@@ -188,10 +209,12 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
     Serial.printf("unknown gap event=%d\n", int(event));
     hang();
   }
+  LOGD("gap_cb finished\n");
 }
   
 static void avrc_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
 {
+  Serial.printf("avrc_cb starting\n");
     switch (event) {
     case ESP_AVRC_CT_METADATA_RSP_EVT:
     case ESP_AVRC_CT_CONNECTION_STATE_EVT:
@@ -204,19 +227,11 @@ static void avrc_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
       Serial.printf("unknown avrc event=%d\n", int(event));
       hang();
     }
+  Serial.printf("avrc_cb finished\n");
 }
 
 static void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
-  switch (event) {
-  case ESP_A2D_CONNECTION_STATE_EVT: // connection state changed event
-    break;
-  case ESP_A2D_AUDIO_STATE_EVT: // audio stream transmission state changed event
-  case ESP_A2D_AUDIO_CFG_EVT: // audio codec is configured, only used for A2DP SINK
-  case ESP_A2D_MEDIA_CTRL_ACK_EVT: // acknowledge event in response to media control commands
-  default:
-    Serial.printf("unknown a2d_cb event=%d\n", int(event));
-    hang();
-  }
+  dispatch(event, param);
 }
 
 static int32_t a2d_data_cb(uint8_t *buf, int32_t len) {
@@ -225,7 +240,7 @@ static int32_t a2d_data_cb(uint8_t *buf, int32_t len) {
   // [in] len: : size(in bytes) of data block to be copied to buf. -1
   //             is an indication to user that data buffer shall be
   //             flushed
-  Serial.printf("len=%d\n", len);
+  Serial.printf("a2d_data_cb len=%d\n", len);
   if (len < 0 || buf == NULL) {
     return 0;
   }
@@ -241,10 +256,11 @@ static int32_t a2d_data_cb(uint8_t *buf, int32_t len) {
 }
 
 static void handle_unconnected(uint16_t event, void *param) {
+  Serial.printf("handle_unconnected starting\n");
   switch (event) {
     case BT_APP_HEART_BEAT_EVT: {
       uint8_t *p = s_peer_bda;
-      Serial.printf("a2dp connecting to peer: %02x:%02x:%02x:%02x:%02x:%02x",
+      Serial.printf("a2dp connecting to peer: %02x:%02x:%02x:%02x:%02x:%02x\n",
                     p[0], p[1], p[2], p[3], p[4], p[5]);
       esp_a2d_source_connect(s_peer_bda);
       s_a2d_state = APP_AV_STATE_CONNECTING;
@@ -255,9 +271,45 @@ static void handle_unconnected(uint16_t event, void *param) {
       Serial.printf("unknown handle_unconnected event=%d\n", int(event));
       hang();
   }
+  Serial.printf("handle_unconnected finished\n");
+}
+
+static void handle_connecting(uint16_t event, void *param) {
+  Serial.printf("handle_connecting starting\n");
+  esp_a2d_cb_param_t *a2d = NULL;
+  switch (event) {
+  case ESP_A2D_CONNECTION_STATE_EVT: {
+    a2d = (esp_a2d_cb_param_t *)(param);
+    if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+      Serial.printf("a2dp connected\n");
+      s_a2d_state =  APP_AV_STATE_CONNECTED;
+      s_media_state = APP_AV_MEDIA_STATE_IDLE;
+      esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_NONE);
+    } else if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+      s_a2d_state =  APP_AV_STATE_UNCONNECTED;
+    }
+    break;
+  }
+  case ESP_A2D_AUDIO_STATE_EVT:
+  case ESP_A2D_AUDIO_CFG_EVT:
+  case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+    break;
+  case BT_APP_HEART_BEAT_EVT:
+    if (++s_connecting_intv >= 2) {
+      Serial.printf("connecting too long, unconnected\n");
+      s_a2d_state = APP_AV_STATE_UNCONNECTED;
+      s_connecting_intv = 0;
+    }
+    break;
+  default:
+    Serial.printf("unknown handle_connecting event=%d\n", int(event));
+    hang();
+  }
+  Serial.printf("handle_connecting finished\n");
 }
 
 static void dispatch(uint16_t event, void *param) {
+  LOGD("dispatch starting\n");
   switch (s_a2d_state) {
   case APP_AV_STATE_IDLE:
   case APP_AV_STATE_DISCOVERING:
@@ -267,18 +319,24 @@ static void dispatch(uint16_t event, void *param) {
     handle_unconnected(event, param);
     break;
   case APP_AV_STATE_CONNECTING:
+    handle_connecting(event, param);
+    break;
   case APP_AV_STATE_CONNECTED:
   case APP_AV_STATE_DISCONNECTING:
   default:
-    Serial.printf("dispatch unhandled state %d\n", s_a2d_state);
-    // hang();
+    LOGE("dispatch unhandled state %d\n", s_a2d_state);
+    hang();
   }
+  LOGD("dispatch finished\n");
 }
 
 void setup() {
   Serial.begin(115200);
   while (!Serial);
   Serial.printf("BlueKeyer setup starting\n");
+  
+  esp_log_set_vprintf(&esp_sysview_vprintf);
+  esp_log_level_set(LOGTAG, LOGLEVEL);
   
   btStart();
   esp_bluedroid_init();
