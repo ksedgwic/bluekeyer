@@ -1,31 +1,28 @@
 // bluetooth, config, discover and audio
-#include "esp_log.h"
-#include "esp_sysview_trace.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 
-// void logit(int level, const char *fmt, va_list ap) {
-//   if (level <= 3) {
-//     char buffer[1024];
-//     vsnprintf(buffer, sizeof(buffer), fmt, ap);
-//     Serial.println(buffer);
-//   }
-// }
+void logit(int level, const char *fmt, ...) {
+  if (level <= 3) {
+    char buffer[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    Serial.println(buffer);
+  }
+}
 
-// #define LOGE( format, ... )  logit(1, format, ##__VA_ARGS__)
-// #define LOGW( format, ... )  logit(2, format, ##__VA_ARGS__)
-// #define LOGI( format, ... )  logit(3, format, ##__VA_ARGS__)
-// #define LOGD( format, ... )  logit(4, format, ##__VA_ARGS__)
+#define LOGE(format, ...)  logit(1, format, ##__VA_ARGS__)
+#define LOGW(format, ...)  logit(2, format, ##__VA_ARGS__)
+#define LOGI(format, ...)  logit(3, format, ##__VA_ARGS__)
+#define LOGD(format, ...)  logit(4, format, ##__VA_ARGS__)
+#define LOGV(format, ...)  logit(5, format, ##__VA_ARGS__)
 
 // double SAMPLE_RATE = 44100;
-
-#define LOGLEVEL ESP_LOG_DEBUG
-static const char *LOGTAG = "bluekeyer";
-#define LOGE( format, ...) ESP_LOGE(LOGTAG, format,  ##__VA_ARGS__)
-#define LOGD( format, ...) ESP_LOGD(LOGTAG, format,  ##__VA_ARGS__)
 
 /* A2DP global state */
 enum {
@@ -110,18 +107,17 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
     uint8_t *eir = NULL;
     esp_bt_gap_dev_prop_t *p;
 
-    // Serial.printf("scanned device: %s\n",
-    //               bda2str(param->disc_res.bda, bda_str, 18));
+    LOGV("scanned device: %s", bda2str(param->disc_res.bda, bda_str, 18));
     for (int i = 0; i < param->disc_res.num_prop; i++) {
         p = param->disc_res.prop + i;
         switch (p->type) {
         case ESP_BT_GAP_DEV_PROP_COD:
             cod = *(uint32_t *)(p->val);
-            // Serial.printf("--Class of Device: 0x%x\n", cod);
+            LOGV("--Class of Device: 0x%x", cod);
             break;
         case ESP_BT_GAP_DEV_PROP_RSSI:
             rssi = *(int8_t *)(p->val);
-            // Serial.printf("--RSSI: %d\n", rssi);
+            LOGV("--RSSI: %d", rssi);
             break;
         case ESP_BT_GAP_DEV_PROP_EIR:
             eir = (uint8_t *)(p->val);
@@ -134,7 +130,7 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
 
     if (eir) {
         get_name_from_eir(eir, s_peer_bdname, NULL);
-        Serial.printf("discovered possible device, address %s, name %s\n",
+        LOGD("discovered possible device, address %s, name %s",
                       bda2str(param->disc_res.bda, bda_str, 18),
                       s_peer_bdname);
     }
@@ -154,33 +150,33 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
             return;
         }
 
-        Serial.printf("Found a target device, address %s, name %s\n",
+        LOGI("Found a target device, address %s, name %s",
                       bda_str, s_peer_bdname);
         s_a2d_state = APP_AV_STATE_DISCOVERED;
         memcpy(s_peer_bda, param->disc_res.bda, ESP_BD_ADDR_LEN);
-        Serial.printf("Cancel device discovery ...\n");
+        LOGI("Cancel device discovery ...");
         esp_bt_gap_cancel_discovery();
     }
 }
 
 static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
-  LOGD("gap_cb starting\n");
+  LOGD("gap_cb starting");
   switch (event) {
   case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: /*!< discovery state changed event */
     if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
       if (s_a2d_state == APP_AV_STATE_DISCOVERED) {
         s_a2d_state = APP_AV_STATE_CONNECTING;
-        Serial.printf("device discovered\n");
-        Serial.printf("a2dp connecting to peer: %s\n", s_peer_bdname);
+        LOGI("device discovered");
+        LOGI("a2dp connecting to peer: %s", s_peer_bdname);
         esp_a2d_source_connect(s_peer_bda);
       } else {
         // not discovered, continue to discover
-        Serial.printf("device discovery failed, continue to discover...\n");
+        LOGI("device discovery failed, continue to discover...");
         esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
       }
     } else if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED) {
-        Serial.printf("discovery started\n");
+        LOGI("discovery started");
     }
     break;
     
@@ -190,10 +186,10 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
     
   case ESP_BT_GAP_AUTH_CMPL_EVT: /*!< AUTH complete event */
     if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
-      Serial.printf("authentication success: %s\n",
+      LOGI("authentication success: %s",
                     param->auth_cmpl.device_name);
     } else {
-      Serial.printf("authentication failed: %d\n",
+      LOGI("authentication failed: %d",
                     param->auth_cmpl.stat);
     }
     break;
@@ -206,15 +202,15 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
   case ESP_BT_GAP_KEY_REQ_EVT: /*!< Simple Pairing Passkey request */
   case ESP_BT_GAP_READ_RSSI_DELTA_EVT: /*!< read rssi event */
   default:
-    Serial.printf("unknown gap event=%d\n", int(event));
+    LOGE("unknown gap event=%d", int(event));
     hang();
   }
-  LOGD("gap_cb finished\n");
+  LOGD("gap_cb finished");
 }
   
 static void avrc_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
 {
-  Serial.printf("avrc_cb starting\n");
+  LOGD("avrc_cb starting");
     switch (event) {
     case ESP_AVRC_CT_METADATA_RSP_EVT:
     case ESP_AVRC_CT_CONNECTION_STATE_EVT:
@@ -224,10 +220,10 @@ static void avrc_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
       // case ESP_AVRC_CT_GET_RN_CAPABILITIES_RSP_EVT:
       // case ESP_AVRC_CT_SET_ABSOLUTE_VOLUME_RSP_EVT:
     default:
-      Serial.printf("unknown avrc event=%d\n", int(event));
+      LOGE("unknown avrc event=%d", int(event));
       hang();
     }
-  Serial.printf("avrc_cb finished\n");
+  LOGD("avrc_cb finished");
 }
 
 static void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
@@ -240,7 +236,7 @@ static int32_t a2d_data_cb(uint8_t *buf, int32_t len) {
   // [in] len: : size(in bytes) of data block to be copied to buf. -1
   //             is an indication to user that data buffer shall be
   //             flushed
-  Serial.printf("a2d_data_cb len=%d\n", len);
+  LOGI("a2d_data_cb len=%d", len);
   if (len < 0 || buf == NULL) {
     return 0;
   }
@@ -256,11 +252,11 @@ static int32_t a2d_data_cb(uint8_t *buf, int32_t len) {
 }
 
 static void handle_unconnected(uint16_t event, void *param) {
-  Serial.printf("handle_unconnected starting\n");
+  LOGD("handle_unconnected starting");
   switch (event) {
     case BT_APP_HEART_BEAT_EVT: {
       uint8_t *p = s_peer_bda;
-      Serial.printf("a2dp connecting to peer: %02x:%02x:%02x:%02x:%02x:%02x\n",
+      LOGI("a2dp connecting to peer: %02x:%02x:%02x:%02x:%02x:%02x",
                     p[0], p[1], p[2], p[3], p[4], p[5]);
       esp_a2d_source_connect(s_peer_bda);
       s_a2d_state = APP_AV_STATE_CONNECTING;
@@ -268,20 +264,20 @@ static void handle_unconnected(uint16_t event, void *param) {
       break;
     }
     default:
-      Serial.printf("unknown handle_unconnected event=%d\n", int(event));
+      LOGE("unknown handle_unconnected event=%d", int(event));
       hang();
   }
-  Serial.printf("handle_unconnected finished\n");
+  LOGD("handle_unconnected finished");
 }
 
 static void handle_connecting(uint16_t event, void *param) {
-  Serial.printf("handle_connecting starting\n");
+  LOGD("handle_connecting starting");
   esp_a2d_cb_param_t *a2d = NULL;
   switch (event) {
   case ESP_A2D_CONNECTION_STATE_EVT: {
     a2d = (esp_a2d_cb_param_t *)(param);
     if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-      Serial.printf("a2dp connected\n");
+      LOGI("a2dp connected");
       s_a2d_state =  APP_AV_STATE_CONNECTED;
       s_media_state = APP_AV_MEDIA_STATE_IDLE;
       esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_NONE);
@@ -296,20 +292,20 @@ static void handle_connecting(uint16_t event, void *param) {
     break;
   case BT_APP_HEART_BEAT_EVT:
     if (++s_connecting_intv >= 2) {
-      Serial.printf("connecting too long, unconnected\n");
+      LOGI("connecting too long, unconnected");
       s_a2d_state = APP_AV_STATE_UNCONNECTED;
       s_connecting_intv = 0;
     }
     break;
   default:
-    Serial.printf("unknown handle_connecting event=%d\n", int(event));
+    LOGE("unknown handle_connecting event=%d", int(event));
     hang();
   }
-  Serial.printf("handle_connecting finished\n");
+  LOGD("handle_connecting finished");
 }
 
 static void dispatch(uint16_t event, void *param) {
-  LOGD("dispatch starting\n");
+  LOGD("dispatch starting");
   switch (s_a2d_state) {
   case APP_AV_STATE_IDLE:
   case APP_AV_STATE_DISCOVERING:
@@ -324,19 +320,16 @@ static void dispatch(uint16_t event, void *param) {
   case APP_AV_STATE_CONNECTED:
   case APP_AV_STATE_DISCONNECTING:
   default:
-    LOGE("dispatch unhandled state %d\n", s_a2d_state);
+    LOGE("dispatch unhandled state %d", s_a2d_state);
     hang();
   }
-  LOGD("dispatch finished\n");
+  LOGD("dispatch finished");
 }
 
 void setup() {
   Serial.begin(115200);
   while (!Serial);
-  Serial.printf("BlueKeyer setup starting\n");
-  
-  esp_log_set_vprintf(&esp_sysview_vprintf);
-  esp_log_level_set(LOGTAG, LOGLEVEL);
+  LOGI("BlueKeyer setup starting");
   
   btStart();
   esp_bluedroid_init();
@@ -363,7 +356,7 @@ void setup() {
   s_a2d_state = APP_AV_STATE_DISCOVERING;
   esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
 
-  Serial.printf("BlueKeyer setup finished\n");
+  LOGI("BlueKeyer setup finished");
 }
 
 void loop() {
@@ -373,7 +366,7 @@ void loop() {
 
 void hang() {
   // Park the CPU in an infinite loop.
-  Serial.printf("BlueKeyer HANGING\n");
+  LOGE("BlueKeyer HANGING");
   while (true)
     delay(1000);
 }
