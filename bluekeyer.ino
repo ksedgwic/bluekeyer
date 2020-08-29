@@ -43,6 +43,19 @@ enum {
     APP_AV_STATE_DISCONNECTING,
 };
 
+char const * a2d_state_str(int state) {
+  switch (state) {
+  case APP_AV_STATE_IDLE: return "APP_AV_STATE_IDLE";
+  case APP_AV_STATE_DISCOVERING: return "APP_AV_STATE_DISCOVERING";
+  case APP_AV_STATE_DISCOVERED: return "APP_AV_STATE_DISCOVERED";
+  case APP_AV_STATE_UNCONNECTED: return "APP_AV_STATE_UNCONNECTED";
+  case APP_AV_STATE_CONNECTING: return "APP_AV_STATE_CONNECTING";
+  case APP_AV_STATE_CONNECTED: return "APP_AV_STATE_CONNECTED";
+  case APP_AV_STATE_DISCONNECTING: return "APP_AV_STATE_DISCONNECTING";
+  default: return "UNKNOWN STATE";
+  }
+}
+
 /* sub states of APP_AV_STATE_CONNECTED */
 enum {
     APP_AV_MEDIA_STATE_IDLE,
@@ -178,13 +191,15 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
       if (s_a2d_state == APP_AV_STATE_DISCOVERED) {
         LOGI("device discovered");
         LOGI("a2dp connecting to peer: %s", s_peer_bdname);
-        esp_a2d_source_connect(s_peer_bda);
+        if (esp_a2d_source_connect(s_peer_bda))
+          FATAL("esp_a2d_source_connect failed");
         s_a2d_state = APP_AV_STATE_CONNECTING;
         s_connecting_intv = 0;
       } else {
         // not discovered, continue to discover
         LOGI("device discovery failed, continue to discover...");
-        esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+        if (esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0))
+          FATAL("esp_bt_gap_start_discovery failed");
       }
     } else if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED) {
         LOGI("discovery started");
@@ -199,7 +214,10 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
     if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
       LOGI("authentication success: %s", param->auth_cmpl.device_name);
       memcpy(s_peer_bda, param->auth_cmpl.bda, ESP_BD_ADDR_LEN);
-      esp_a2d_source_connect(s_peer_bda);
+      char buf[18];
+      LOGI("source connect to %s", bda2str(s_peer_bda, buf, sizeof(buf)));
+      if (esp_a2d_source_connect(s_peer_bda))
+        FATAL("esp_a2d_source_connect failed");
       s_a2d_state = APP_AV_STATE_CONNECTING;
       s_connecting_intv = 0;
     } else {
@@ -240,9 +258,9 @@ static void avrc_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
 }
 
 static void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
-  LOGD("a2d_cb starting");
+  LOGV("a2d_cb starting");
   dispatch(event, param);
-  LOGD("a2d_cb finished");
+  LOGV("a2d_cb finished");
 }
 
 static int32_t a2d_data_cb(uint8_t *buf, int32_t len) {
@@ -271,9 +289,10 @@ static void handle_unconnected(uint16_t event, void *param) {
   switch (event) {
     case BT_APP_HEART_BEAT_EVT: {
       char bda_str[18];
-      LOGI("a2dp connecting to peer: %02x:%02x:%02x:%02x:%02x:%02x",
+      LOGI("a2dp connecting to peer: %s",
            bda2str(s_peer_bda, bda_str, sizeof(bda_str)));
-      esp_a2d_source_connect(s_peer_bda);
+      if (esp_a2d_source_connect(s_peer_bda))
+        FATAL("esp_a2d_source_connect failed");
       s_a2d_state = APP_AV_STATE_CONNECTING;
       s_connecting_intv = 0;
       break;
@@ -294,24 +313,44 @@ static void handle_connecting(uint16_t event, void *param) {
   LOGV("handle_connecting starting");
   esp_a2d_cb_param_t *a2d = NULL;
   switch (event) {
-  case ESP_A2D_CONNECTION_STATE_EVT: {
+  case ESP_A2D_CONNECTION_STATE_EVT:
     a2d = (esp_a2d_cb_param_t *)(param);
-    if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-      LOGI("a2dp connected");
+    switch (a2d->conn_stat.state) {
+    case ESP_A2D_CONNECTION_STATE_DISCONNECTED: /*!< connection released  */
+      LOGI("handle_connecting saw ESP_A2D_CONNECTION_STATE_DISCONNECTED");
+      LOGI("reason = %s", a2d->conn_stat.disc_rsn ? "ABNORMAL" : "NORMAL");
+      LOGI("a2dp disconnected");
+      s_a2d_state =  APP_AV_STATE_UNCONNECTED;
+      break;
+    case ESP_A2D_CONNECTION_STATE_CONNECTING: /*!< connecting remote device */
+      LOGI("handle_connecting saw ESP_A2D_CONNECTION_STATE_CONNECTING");
+      break;
+    case ESP_A2D_CONNECTION_STATE_CONNECTED: /*!< connection established */
+      LOGI("handle_connecting saw ESP_A2D_CONNECTION_STATE_CONNECTED");
       s_a2d_state =  APP_AV_STATE_CONNECTED;
       s_media_state = APP_AV_MEDIA_STATE_IDLE;
-      esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_NONE);
-    } else if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-      // LOGI("a2dp disconnected");
-      // s_a2d_state =  APP_AV_STATE_UNCONNECTED;
+      if (esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_NONE))
+        FATAL("esp_bt_gap_set_scan_mode failed");
+      break;
+    case ESP_A2D_CONNECTION_STATE_DISCONNECTING: /*!< disconing remote device */
+      LOGI("handle_connecting saw ESP_A2D_CONNECTION_STATE_DISCONNECTING");
+      break;
+    default:
+      LOGI("unknown esp_a2d_connection_state_t %d", a2d->conn_stat.state);
+      break;
     }
     break;
-  }
   case ESP_A2D_AUDIO_STATE_EVT:
+    LOGI("handle_connecting saw ESP_A2D_AUDIO_STATE_EVT");
+    break;
   case ESP_A2D_AUDIO_CFG_EVT:
+    LOGI("handle_connecting saw ESP_A2D_AUDIO_CFG_EVT");
+    break;
   case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+    LOGI("handle_connecting saw ESP_A2D_MEDIA_CTRL_ACK_EVT");
     break;
   case BT_APP_HEART_BEAT_EVT:
+    LOGI("handle_connecting saw BT_APP_HEART_BEAT_EVT");
     if (++s_connecting_intv >= 10) {
       LOGI("connecting too long, unconnected");
       s_a2d_state = APP_AV_STATE_UNCONNECTED;
@@ -326,7 +365,7 @@ static void handle_connecting(uint16_t event, void *param) {
 }
 
 static void dispatch(uint16_t event, void *param) {
-  LOGV("dispatch starting");
+  LOGD("dispatch starting in state %s", a2d_state_str(s_a2d_state));
   switch (s_a2d_state) {
   case APP_AV_STATE_IDLE:
   case APP_AV_STATE_DISCOVERING:
@@ -344,7 +383,7 @@ static void dispatch(uint16_t event, void *param) {
     LOGE("dispatch unhandled state %d", s_a2d_state);
     hang();
   }
-  LOGV("dispatch finished");
+  LOGD("dispatch finished in state %s", a2d_state_str(s_a2d_state));
 }
 
 void setup() {
@@ -355,37 +394,46 @@ void setup() {
   if (!btStart())
     FATAL("btStart failed");
     
-  if (esp_bluedroid_init() != ESP_OK)
+  if (esp_bluedroid_init())
     FATAL("esp_bluedroid_init failed");
 
-  if (esp_bluedroid_enable() != ESP_OK)
+  if (esp_bluedroid_enable())
     FATAL("esp_bluedroid_enable failed");
 
   const char *dev_name = "BlueKeyer";
-  if (esp_bt_dev_set_device_name(dev_name) != ESP_OK)
+  if (esp_bt_dev_set_device_name(dev_name))
     FATAL("esp_bt_dev_set_device_name %s failed", dev_name);
 
   // GAP
-  if (esp_bt_gap_register_callback(gap_cb) != ESP_OK)
+  if (esp_bt_gap_register_callback(gap_cb))
     FATAL("esp_bt_gap_register_callback failed");
 
   // AVRCP
-  if (esp_avrc_ct_init() != ESP_OK)
+  if (esp_avrc_ct_init())
     FATAL("esp_avrc_ct_init failed");
-  if (esp_avrc_ct_register_callback(avrc_cb) != ESP_OK)
+  if (esp_avrc_ct_register_callback(avrc_cb))
     FATAL("esp_avrc_ct_register_callback failed");
 
   // A2DP
-  if (esp_a2d_register_callback(a2d_cb) != ESP_OK)
+  if (esp_a2d_register_callback(a2d_cb))
     FATAL("esp_a2d_register_callback failed");
-  if (esp_a2d_source_register_data_callback(a2d_data_cb) != ESP_OK)
+  if (esp_a2d_source_register_data_callback(a2d_data_cb))
     FATAL("esp_a2d_source_register_data_callback failed");
-  if (esp_a2d_source_init() != ESP_OK)
+  if (esp_a2d_source_init())
     FATAL("esp_a2d_source_init failed");
+
+  // service     major minor
+  // 00000000000 00000 000000 00
+  // 00100000000 00100 000100 00
+  esp_bt_cod_t cod;
+  cod.service = ESP_BT_COD_SRVC_AUDIO;	// 0x100	0b100000000
+  cod.major = ESP_BT_COD_MAJOR_DEV_AV;	// 4            0b100
+  cod.minor = 0b000100;			// Microphone
+  if (esp_bt_gap_set_cod(cod, ESP_BT_INIT_COD))
+    FATAL("esp_bt_gap_set_cod failed");
   
   // set discoverable and connectable mode, wait to be connected
-  if (esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE) !=
-      ESP_OK)
+  if (esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE))
     FATAL("esp_bt_gap_set_scan_mode failed");
 
   s_a2d_state = APP_AV_STATE_IDLE;
@@ -396,7 +444,7 @@ void setup() {
 }
 
 void loop() {
-  delay(1000);
+  delay(10000);
   dispatch(BT_APP_HEART_BEAT_EVT, NULL);
 }
 
@@ -406,3 +454,5 @@ void hang() {
   while (true)
     delay(1000);
 }
+
+// B0:2A:43:FC:58:A3
