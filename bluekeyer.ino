@@ -5,8 +5,10 @@
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 
+#define LOGLVL	4
+
 void logit(int level, const char *fmt, ...) {
-  if (level <= 3) {
+  if (level <= LOGLVL) {
     char buffer[1024];
     va_list args;
     va_start(args, fmt);
@@ -15,6 +17,12 @@ void logit(int level, const char *fmt, ...) {
     Serial.println(buffer);
   }
 }
+
+#define FATAL(format, ...)                      \
+  do {                                          \
+    logit(1, format, ##__VA_ARGS__);            \
+    hang();                                     \
+  } while (false)
 
 #define LOGE(format, ...)  logit(1, format, ##__VA_ARGS__)
 #define LOGW(format, ...)  logit(2, format, ##__VA_ARGS__)
@@ -107,7 +115,8 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
     uint8_t *eir = NULL;
     esp_bt_gap_dev_prop_t *p;
 
-    LOGV("scanned device: %s", bda2str(param->disc_res.bda, bda_str, 18));
+    LOGV("scanned device: %s",
+         bda2str(param->disc_res.bda, bda_str, sizeof(bda_str)));
     for (int i = 0; i < param->disc_res.num_prop; i++) {
         p = param->disc_res.prop + i;
         switch (p->type) {
@@ -130,7 +139,7 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
 
     if (eir) {
         get_name_from_eir(eir, s_peer_bdname, NULL);
-        LOGD("discovered possible device, address %s, name %s",
+        LOGV("discovered possible device, address %s, name %s",
                       bda2str(param->disc_res.bda, bda_str, 18),
                       s_peer_bdname);
     }
@@ -143,10 +152,11 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
     }
 #endif
 
+    #define TARGET "TH-D74"
     /* search for a particular device name in its extended inqury response */
     if (eir) {
         get_name_from_eir(eir, s_peer_bdname, NULL);
-        if (strcmp((char *)s_peer_bdname, "Pixel 3") != 0) {
+        if (strcmp((char *)s_peer_bdname, TARGET) != 0) {
             return;
         }
 
@@ -161,15 +171,16 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
 
 static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
-  LOGD("gap_cb starting");
+  LOGV("gap_cb starting");
   switch (event) {
   case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: /*!< discovery state changed event */
     if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
       if (s_a2d_state == APP_AV_STATE_DISCOVERED) {
-        s_a2d_state = APP_AV_STATE_CONNECTING;
         LOGI("device discovered");
         LOGI("a2dp connecting to peer: %s", s_peer_bdname);
         esp_a2d_source_connect(s_peer_bda);
+        s_a2d_state = APP_AV_STATE_CONNECTING;
+        s_connecting_intv = 0;
       } else {
         // not discovered, continue to discover
         LOGI("device discovery failed, continue to discover...");
@@ -186,11 +197,13 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
     
   case ESP_BT_GAP_AUTH_CMPL_EVT: /*!< AUTH complete event */
     if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
-      LOGI("authentication success: %s",
-                    param->auth_cmpl.device_name);
+      LOGI("authentication success: %s", param->auth_cmpl.device_name);
+      memcpy(s_peer_bda, param->auth_cmpl.bda, ESP_BD_ADDR_LEN);
+      esp_a2d_source_connect(s_peer_bda);
+      s_a2d_state = APP_AV_STATE_CONNECTING;
+      s_connecting_intv = 0;
     } else {
-      LOGI("authentication failed: %d",
-                    param->auth_cmpl.stat);
+      LOGI("authentication failed: %d", param->auth_cmpl.stat);
     }
     break;
 
@@ -205,7 +218,7 @@ static void gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
     LOGE("unknown gap event=%d", int(event));
     hang();
   }
-  LOGD("gap_cb finished");
+  LOGV("gap_cb finished");
 }
   
 static void avrc_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
@@ -227,7 +240,9 @@ static void avrc_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
 }
 
 static void a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
+  LOGD("a2d_cb starting");
   dispatch(event, param);
+  LOGD("a2d_cb finished");
 }
 
 static int32_t a2d_data_cb(uint8_t *buf, int32_t len) {
@@ -255,14 +270,19 @@ static void handle_unconnected(uint16_t event, void *param) {
   LOGD("handle_unconnected starting");
   switch (event) {
     case BT_APP_HEART_BEAT_EVT: {
-      uint8_t *p = s_peer_bda;
+      char bda_str[18];
       LOGI("a2dp connecting to peer: %02x:%02x:%02x:%02x:%02x:%02x",
-                    p[0], p[1], p[2], p[3], p[4], p[5]);
+           bda2str(s_peer_bda, bda_str, sizeof(bda_str)));
       esp_a2d_source_connect(s_peer_bda);
       s_a2d_state = APP_AV_STATE_CONNECTING;
       s_connecting_intv = 0;
       break;
     }
+    case ESP_A2D_CONNECTION_STATE_EVT:
+    case ESP_A2D_AUDIO_STATE_EVT:
+    case ESP_A2D_AUDIO_CFG_EVT:
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+        break;
     default:
       LOGE("unknown handle_unconnected event=%d", int(event));
       hang();
@@ -271,7 +291,7 @@ static void handle_unconnected(uint16_t event, void *param) {
 }
 
 static void handle_connecting(uint16_t event, void *param) {
-  LOGD("handle_connecting starting");
+  LOGV("handle_connecting starting");
   esp_a2d_cb_param_t *a2d = NULL;
   switch (event) {
   case ESP_A2D_CONNECTION_STATE_EVT: {
@@ -282,7 +302,8 @@ static void handle_connecting(uint16_t event, void *param) {
       s_media_state = APP_AV_MEDIA_STATE_IDLE;
       esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_NONE);
     } else if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-      s_a2d_state =  APP_AV_STATE_UNCONNECTED;
+      // LOGI("a2dp disconnected");
+      // s_a2d_state =  APP_AV_STATE_UNCONNECTED;
     }
     break;
   }
@@ -291,7 +312,7 @@ static void handle_connecting(uint16_t event, void *param) {
   case ESP_A2D_MEDIA_CTRL_ACK_EVT:
     break;
   case BT_APP_HEART_BEAT_EVT:
-    if (++s_connecting_intv >= 2) {
+    if (++s_connecting_intv >= 10) {
       LOGI("connecting too long, unconnected");
       s_a2d_state = APP_AV_STATE_UNCONNECTED;
       s_connecting_intv = 0;
@@ -301,11 +322,11 @@ static void handle_connecting(uint16_t event, void *param) {
     LOGE("unknown handle_connecting event=%d", int(event));
     hang();
   }
-  LOGD("handle_connecting finished");
+  LOGV("handle_connecting finished");
 }
 
 static void dispatch(uint16_t event, void *param) {
-  LOGD("dispatch starting");
+  LOGV("dispatch starting");
   switch (s_a2d_state) {
   case APP_AV_STATE_IDLE:
   case APP_AV_STATE_DISCOVERING:
@@ -323,38 +344,53 @@ static void dispatch(uint16_t event, void *param) {
     LOGE("dispatch unhandled state %d", s_a2d_state);
     hang();
   }
-  LOGD("dispatch finished");
+  LOGV("dispatch finished");
 }
 
 void setup() {
   Serial.begin(115200);
   while (!Serial);
   LOGI("BlueKeyer setup starting");
-  
-  btStart();
-  esp_bluedroid_init();
-  esp_bluedroid_enable();
+
+  if (!btStart())
+    FATAL("btStart failed");
+    
+  if (esp_bluedroid_init() != ESP_OK)
+    FATAL("esp_bluedroid_init failed");
+
+  if (esp_bluedroid_enable() != ESP_OK)
+    FATAL("esp_bluedroid_enable failed");
 
   const char *dev_name = "BlueKeyer";
-  esp_bt_dev_set_device_name(dev_name);
+  if (esp_bt_dev_set_device_name(dev_name) != ESP_OK)
+    FATAL("esp_bt_dev_set_device_name %s failed", dev_name);
 
   // GAP
-  esp_bt_gap_register_callback(gap_cb);
+  if (esp_bt_gap_register_callback(gap_cb) != ESP_OK)
+    FATAL("esp_bt_gap_register_callback failed");
 
   // AVRCP
-  esp_avrc_ct_init();
-  esp_avrc_ct_register_callback(avrc_cb);
+  if (esp_avrc_ct_init() != ESP_OK)
+    FATAL("esp_avrc_ct_init failed");
+  if (esp_avrc_ct_register_callback(avrc_cb) != ESP_OK)
+    FATAL("esp_avrc_ct_register_callback failed");
 
   // A2DP
-  esp_a2d_register_callback(a2d_cb);
-  esp_a2d_source_register_data_callback(a2d_data_cb);
-  esp_a2d_source_init();
+  if (esp_a2d_register_callback(a2d_cb) != ESP_OK)
+    FATAL("esp_a2d_register_callback failed");
+  if (esp_a2d_source_register_data_callback(a2d_data_cb) != ESP_OK)
+    FATAL("esp_a2d_source_register_data_callback failed");
+  if (esp_a2d_source_init() != ESP_OK)
+    FATAL("esp_a2d_source_init failed");
   
   // set discoverable and connectable mode, wait to be connected
-  esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE); 
+  if (esp_bt_gap_set_scan_mode(ESP_BT_SCAN_MODE_CONNECTABLE_DISCOVERABLE) !=
+      ESP_OK)
+    FATAL("esp_bt_gap_set_scan_mode failed");
 
-  s_a2d_state = APP_AV_STATE_DISCOVERING;
-  esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+  s_a2d_state = APP_AV_STATE_IDLE;
+  // s_a2d_state = APP_AV_STATE_DISCOVERING;
+  // esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
 
   LOGI("BlueKeyer setup finished");
 }
@@ -366,7 +402,7 @@ void loop() {
 
 void hang() {
   // Park the CPU in an infinite loop.
-  LOGE("BlueKeyer HANGING");
+  LOGE("BLUEKEYER HANGING");
   while (true)
     delay(1000);
 }
