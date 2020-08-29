@@ -324,6 +324,11 @@ static void handle_connecting(uint16_t event, void *param) {
       break;
     case ESP_A2D_CONNECTION_STATE_CONNECTING: /*!< connecting remote device */
       LOGI("handle_connecting saw ESP_A2D_CONNECTION_STATE_CONNECTING");
+#if 0      
+      LOGI("sending ESP_A2D_MEDIA_CTRL_START");
+      if (esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START))
+        FATAL("esp_a2d_media_ctrl failed");
+#endif
       break;
     case ESP_A2D_CONNECTION_STATE_CONNECTED: /*!< connection established */
       LOGI("handle_connecting saw ESP_A2D_CONNECTION_STATE_CONNECTED");
@@ -348,6 +353,8 @@ static void handle_connecting(uint16_t event, void *param) {
     break;
   case ESP_A2D_MEDIA_CTRL_ACK_EVT:
     LOGI("handle_connecting saw ESP_A2D_MEDIA_CTRL_ACK_EVT");
+    LOGI("esp_a2d_media_ctrl_ack_t = %d",
+         ((esp_a2d_cb_param_t *) param)->media_ctrl_stat.status);
     break;
   case BT_APP_HEART_BEAT_EVT:
     LOGI("handle_connecting saw BT_APP_HEART_BEAT_EVT");
@@ -409,10 +416,10 @@ void setup() {
     FATAL("esp_bt_gap_register_callback failed");
 
   // AVRCP
-  if (esp_avrc_ct_init())
-    FATAL("esp_avrc_ct_init failed");
   if (esp_avrc_ct_register_callback(avrc_cb))
     FATAL("esp_avrc_ct_register_callback failed");
+  if (esp_avrc_ct_init())
+    FATAL("esp_avrc_ct_init failed");
 
   // A2DP
   if (esp_a2d_register_callback(a2d_cb))
